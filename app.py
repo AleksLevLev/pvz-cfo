@@ -7,7 +7,7 @@ import numpy as np
 # --- 1. CONFIG & STYLE (DESIGN SYSTEM) ---
 st.set_page_config(
     layout="wide",
-    page_title="PvZ CFO",
+    page_title="Финансы ПВЗ 📦",
     page_icon="📦",
     initial_sidebar_state="collapsed"
 )
@@ -103,7 +103,7 @@ def get_mock_data():
 
 # --- 4. SIDEBAR (CONTROLS) ---
 with st.sidebar:
-    st.header("⚙️ Настройки")
+    st.header("⚙️ Настройки расходов")
     
     st.subheader("Загрузка данных")
     st.info("Чтобы построить отчет, загрузите Excel-файл с детализацией из Wildberries.")
@@ -124,7 +124,7 @@ with st.sidebar:
     reserve_rate = st.number_input("% в Резерв", value=15.0, step=1.0)
 
 # --- 5. MAIN INTERFACE ---
-st.title("PvZ CFO 📦")
+st.title("Финансы ПВЗ 📦")
 
 # --- A. STAFF MANAGEMENT (Hidden by default to focus on metrics) ---
 with st.expander("👥 Управление сменами (ФОТ)", expanded=False):
@@ -151,6 +151,7 @@ with st.expander("👥 Управление сменами (ФОТ)", expanded=F
 # --- B. DATA PROCESSING ---
 if uploaded_file:
     try:
+        df = None
         # 1. Read file based on extension
         if uploaded_file.name.endswith('.csv'):
             try:
@@ -170,25 +171,60 @@ if uploaded_file:
                     uploaded_file.seek(0)
                     df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
         else:
-            df = pd.read_excel(uploaded_file)
+            # Smart Sheet Search
+            xls = pd.read_excel(uploaded_file, sheet_name=None) # Read all sheets
+            
+            # Potential column names we are looking for (Russian or English)
+            target_columns = ['wb_reward', 'Вайлдберриз реализовал', 'Прибыль', 'Штрафы']
+            
+            found_sheet = False
+            for sheet_name, sheet_df in xls.items():
+                # Check if any target column exists in this sheet
+                if any(col in sheet_df.columns for col in target_columns):
+                    df = sheet_df
+                    found_sheet = True
+                    st.toast(f"✅ Данные найдены на листе: {sheet_name}", icon="📄")
+                    break
+            
+            if not found_sheet:
+                # Fallback to first sheet if nothing specific found
+                df = list(xls.values())[0]
 
         # 2. Normalize and Rename columns
         # Strip whitespace from column names
         df.columns = df.columns.astype(str).str.strip()
         
+        # --- FORMAT 1: Standard WB Detailization ---
         # Map known WB columns to our internal variable names
-        column_mapping = {
+        column_mapping_standard = {
             'Вайлдберриз реализовал': 'wb_reward',
             'Штрафы': 'penalty_amount',
             'Тип операции': 'operation_type',
             'Обоснование штрафа': 'penalty_reason',
             'Вид начисления': 'operation_type',
             'Начислено': 'wb_reward',
-            'Кол-во': 'quantity', # Optional
-            'Баркод': 'barcode'   # Optional
+            'Кол-во': 'quantity',
+            'Баркод': 'barcode',
+            'Дата': 'date',
+            'date': 'date',
+            'Время': 'date'
         }
-        df = df.rename(columns=column_mapping)
+        df = df.rename(columns=column_mapping_standard)
         
+        # --- FORMAT 2: Sales Report (Analytics/Unit Economics) ---
+        # If standard columns are missing, try to construct them from Sales Report columns
+        if 'wb_reward' not in df.columns and 'Прибыль' in df.columns:
+            st.toast("Обнаружен формат 'Отчет по продажам'. Адаптируем...", icon="🔄")
+            df['wb_reward'] = df['Прибыль'] # Map Profit to Reward
+            
+            if 'Удержания' in df.columns:
+                df['penalty_amount'] = df['Удержания']
+            else:
+                df['penalty_amount'] = 0
+                
+            df['operation_type'] = 'Выдача' # Assume all rows are sales
+            df['penalty_reason'] = 'Прочее'
+
         # Validation of columns
         required_cols = ['wb_reward', 'penalty_amount', 'operation_type', 'penalty_reason']
         # Check if columns exist (case-insensitive check could be added here if needed, but rename handles it if mapping is correct)
@@ -200,11 +236,29 @@ if uploaded_file:
             st.info("Попробуйте сохранить файл как обычный Excel (.xlsx) или проверьте названия заголовков.")
             st.stop()
             
+        # Fill NaNs for safety
+        df['penalty_amount'] = df['penalty_amount'].fillna(0)
+        df['wb_reward'] = df['wb_reward'].fillna(0)
+            
     except Exception as e:
         st.error(f"Ошибка при чтении файла: {e}")
         st.stop()
 else:
     df = get_mock_data()
+
+# --- DATE DETECTION ---
+report_period = ""
+if 'date' in df.columns:
+    try:
+        # Try to convert to datetime, errors='coerce' turns bad data into NaT
+        df['date'] = pd.to_datetime(df['date'], dayfirst=True, errors='coerce')
+        min_date = df['date'].min()
+        max_date = df['date'].max()
+        if pd.notnull(min_date) and pd.notnull(max_date):
+            report_period = f"{min_date.strftime('%d.%m')} — {max_date.strftime('%d.%m')}"
+            # st.header removed here, moved to verdict block
+    except:
+        pass # Fail silently if date parsing fails
 
 # --- C. CALCULATIONS (THE CORE) ---
 gross_income = df['wb_reward'].sum()
@@ -226,9 +280,19 @@ avg_revenue = (gross_income / issue_ops) if issue_ops > 0 else 0
 st.subheader("Финансовый результат")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Начислено", f"{gross_income:,.0f} ₽".replace(',', ' '))
-c2.metric("Штрафы", f"{total_penalties:,.0f} ₽".replace(',', ' '), delta="-Loss" if total_penalties > 0 else "OK", delta_color="inverse")
-c3.metric("Прибыль (Net)", f"{net_profit:,.0f} ₽".replace(',', ' '), delta="Profit" if net_profit > 0 else "Loss")
+c2.metric("Штрафы", f"{total_penalties:,.0f} ₽".replace(',', ' '))
+c3.metric("Прибыль (Net)", f"{net_profit:,.0f} ₽".replace(',', ' '))
 c4.metric("На вывод", f"{dividends:,.0f} ₽".replace(',', ' '), help=f"За вычетом {reserve_rate}% резерва")
+
+st.markdown("---")
+
+# --- SIMPLE CONCLUSIONS (HUMAN READABLE) ---
+st.subheader("🤖 Анализ ситуации")
+
+if net_profit > 0:
+    st.success(f"✅ **Отличная работа!**\n\nТочка в плюсе на **{net_profit:,.0f} ₽**. Можно выводить дивиденды.\n\n📅 *Отчет по операциям за период: {report_period}*")
+else:
+    st.error(f"🚨 **Внимание! Убыток {abs(net_profit):,.0f} ₽.**\n\nРасходы превышают доходы. Проверьте штрафы и ФОТ.\n\n📅 *Отчет по операциям за период: {report_period}*")
 
 st.markdown("---")
 
@@ -249,6 +313,7 @@ with col_main:
         increasing={"marker": {"color": "#2BD17E"}},
         totals={"marker": {"color": "#333333"}}
     ))
+    fig_waterfall.update_traces(hovertemplate='%{label}: %{value:,.0f} ₽<extra></extra>')
     fig_waterfall.update_layout(
         title="Движение средств (Waterfall)", 
         margin=dict(l=0, r=0, t=40, b=0),
@@ -270,6 +335,7 @@ with col_side:
             hole=0.4,
             color_discrete_sequence=px.colors.sequential.RdBu
         )
+        fig_pie.update_traces(hovertemplate='%{label}: %{value:,.0f} ₽<extra></extra>')
         fig_pie.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=350, showlegend=False)
         st.plotly_chart(fig_pie, use_container_width=True)
     else:
