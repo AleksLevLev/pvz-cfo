@@ -36,7 +36,7 @@ st.markdown("""
         line-height: 0 !important;
     }
     section[aria-label="Перетащите файл сюда"] > div > div > span:nth-child(2)::after {
-        content: "Максимум 200МБ • XLSX";
+        content: "Максимум 200МБ • XLSX / CSV";
         font-size: 0.8rem !important;
         line-height: 1.5 !important;
         display: block;
@@ -107,7 +107,7 @@ with st.sidebar:
     
     st.subheader("Загрузка данных")
     st.info("Чтобы построить отчет, загрузите Excel-файл с детализацией из Wildberries.")
-    uploaded_file = st.file_uploader("Перетащите файл сюда", type=['xlsx'])
+    uploaded_file = st.file_uploader("Перетащите файл сюда", type=['xlsx', 'csv'])
     
     st.divider()
     
@@ -151,15 +151,53 @@ with st.expander("👥 Управление сменами (ФОТ)", expanded=F
 # --- B. DATA PROCESSING ---
 if uploaded_file:
     try:
-        df = pd.read_excel(uploaded_file)
+        # 1. Read file based on extension
+        if uploaded_file.name.endswith('.csv'):
+            try:
+                # Attempt 1: Try reading as standard CSV (comma, utf-8)
+                df = pd.read_csv(uploaded_file)
+                # If it looks like it failed to parse columns (e.g. all in one column), try separator ';'
+                if df.shape[1] < 2:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, sep=';')
+            except:
+                # Attempt 2: Try reading as Russian Excel CSV (semicolon, cp1251)
+                uploaded_file.seek(0)
+                try:
+                    df = pd.read_csv(uploaded_file, sep=';', encoding='cp1251')
+                except:
+                    # Final attempt: just utf-8 with semicolon
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
+        else:
+            df = pd.read_excel(uploaded_file)
+
+        # 2. Normalize and Rename columns
+        # Strip whitespace from column names
+        df.columns = df.columns.astype(str).str.strip()
+        
+        # Map known WB columns to our internal variable names
+        column_mapping = {
+            'Вайлдберриз реализовал': 'wb_reward',
+            'Штрафы': 'penalty_amount',
+            'Тип операции': 'operation_type',
+            'Обоснование штрафа': 'penalty_reason',
+            'Вид начисления': 'operation_type',
+            'Начислено': 'wb_reward',
+            'Кол-во': 'quantity', # Optional
+            'Баркод': 'barcode'   # Optional
+        }
+        df = df.rename(columns=column_mapping)
         
         # Validation of columns
         required_cols = ['wb_reward', 'penalty_amount', 'operation_type', 'penalty_reason']
+        # Check if columns exist (case-insensitive check could be added here if needed, but rename handles it if mapping is correct)
         missing_cols = [col for col in required_cols if col not in df.columns]
         
         if missing_cols:
-            st.error(f"❌ В загруженном файле не найдены обязательные столбцы: {', '.join(missing_cols)}")
-            st.info("Убедитесь, что загружаете корректный отчет (или переименуйте столбцы в: wb_reward, penalty_amount, operation_type, penalty_reason)")
+            st.error(f"❌ Ошибка структуры файла. Не найдены столбцы: {', '.join(missing_cols)}")
+            st.warning(f"Найденные столбцы: {list(df.columns)}")
+            st.info("Попробуйте сохранить файл как обычный Excel (.xlsx) или проверьте названия заголовков.")
             st.stop()
             
     except Exception as e:
